@@ -13,6 +13,7 @@ DAILY DATA REFRESH:
   comes from is never surfaced to whoever is viewing the dashboard.
 """
 import os
+from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
@@ -141,8 +142,9 @@ catalogue, label_maps, uniq_vars, data_raw = load_everything()
 if "SubmissionDate" in data_raw.columns:
     _last_interview = pd.to_datetime(data_raw["SubmissionDate"], errors="coerce", dayfirst=True).max()
     if pd.notna(_last_interview):
-        st.sidebar.caption(f"🗓️ Last interview: {_last_interview.strftime('%d %b %Y, %H:%M')}")
-st.sidebar.caption(f"🔄 Dashboard updated: {pd.Timestamp.now().strftime('%d %b %Y, %H:%M')}")
+        st.sidebar.caption(f"🗓️ Last interview: {_last_interview.strftime('%d %b %Y, %H:%M')} PKT")
+_now_pkt = pd.Timestamp.now(tz="UTC").astimezone(ZoneInfo("Asia/Karachi"))
+st.sidebar.caption(f"🔄 Dashboard updated: {_now_pkt.strftime('%d %b %Y, %H:%M')} PKT")
 
 PAGES = [
     ("overview", "📖 Story Overview"),
