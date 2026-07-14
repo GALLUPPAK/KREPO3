@@ -4,15 +4,13 @@ National AI Hub for MNCH — Punjab Mapping (Study S-22620)
 Story-style Streamlit + Plotly analytics dashboard for Gallup Pakistan / GPDA.
 
 DAILY DATA REFRESH:
-  Just overwrite  data/survey_data.csv  in the GitHub repo with the latest
-  SurveyCTO export (same column layout — new columns are fine too) and
-  push. Streamlit Cloud redeploys automatically, and this app re-reads the
-  file (cache is keyed on the file's modified-time, so a same-filename
-  overwrite is picked up immediately — no code change needed, even if the
-  number of rows or the set of columns grows).
+  The private Hugging Face dataset (see README) is checked every 5 minutes and
+  picked up automatically — no redeploy needed. If not configured, this falls
+  back to  data/survey_data.csv  in the repo, refreshed by overwriting that
+  file and pushing.
 
-  The sidebar "📡 Data source" panel also lets you upload a CSV ad hoc to
-  preview a different export without touching the repo.
+  There is no visible data-source picker in the UI by design — where the data
+  comes from is never surfaced to whoever is viewing the dashboard.
 """
 import os
 import pandas as pd
@@ -94,49 +92,42 @@ def _hf_paths(repo_id, data_filename, form_filename, token):
     return data_path, form_path
 
 
-def load_everything(source: str, uploaded_file):
+def load_everything():
     bundled_exists = os.path.exists(du.DATA_PATH_DEFAULT)
     form_path_to_use = du.FORM_PATH_DEFAULT
+    hf_ready = _hf_secrets_available()
 
-    if source == "hf":
+    if hf_ready:
         try:
             hf = st.secrets["huggingface"]
             token = _resolve_hf_token(hf)
             if not token:
-                raise RuntimeError("No token found in secrets or the BA_TKN environment variable.")
+                raise RuntimeError("no token available")
             data_path, form_path_to_use = _hf_paths(
                 hf["repo_id"],
                 _hf_filename(hf, hf.get("data_filename", "survey_data.csv")),
                 _hf_filename(hf, hf["form_filename"]) if hf.get("form_filename") else "",
                 token,
             )
-            source_note = f"Private Hugging Face dataset ({hf['repo_id']}) — refreshed every 5 min"
-        except Exception as e:
-            if bundled_exists:
-                st.sidebar.warning(f"Hugging Face pull unavailable, showing bundled file instead. ({e})")
-                data_path = du.DATA_PATH_DEFAULT
-                source_note = "Bundled file (Hugging Face unavailable)"
-            else:
-                st.sidebar.error(f"Hugging Face pull failed and no bundled fallback file is present. ({e})")
+            mtime = os.path.getmtime(data_path)
+            data_df = _load_csv_cached(data_path, mtime)
+        except Exception:
+            if not bundled_exists:
+                st.error("Data is temporarily unavailable. Please try again shortly.")
                 st.stop()
-        mtime = os.path.getmtime(data_path)
-        data_df = _load_csv_cached(data_path, mtime)
-    elif source == "upload" and uploaded_file is not None:
-        data_df = pd.read_csv(uploaded_file, low_memory=False)
-        source_note = f"Uploaded file: {uploaded_file.name}"
+            mtime = os.path.getmtime(du.DATA_PATH_DEFAULT)
+            data_df = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
     elif bundled_exists:
         mtime = os.path.getmtime(du.DATA_PATH_DEFAULT)
         data_df = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
-        source_note = "Bundled repo file data/survey_data.csv"
     else:
-        st.sidebar.warning("No data file found. Upload a CSV to preview, or configure the "
-                            "[huggingface] source in Settings → Secrets.")
+        st.error("Data is temporarily unavailable. Please try again shortly.")
         st.stop()
 
     catalogue, label_maps = _load_form_cached(form_path_to_use)
     uniq = du.get_unique_variables(catalogue)
     data_df = du.coalesce_pathway_columns(data_df, catalogue)
-    return catalogue, label_maps, uniq, data_df, source_note
+    return catalogue, label_maps, uniq, data_df
 
 
 # --------------------------------------------------------------------------
@@ -145,22 +136,13 @@ def load_everything(source: str, uploaded_file):
 st.sidebar.markdown("## National AI Hub for MNCH")
 st.sidebar.caption("Punjab Mapping · Study S-22620 · Gallup Pakistan Digital Analytics")
 
-with st.sidebar.expander("📡 Data source", expanded=False):
-    hf_ready = _hf_secrets_available()
-    source_options = (["hf"] if hf_ready else []) + ["repo", "upload"]
-    source = st.radio(
-        "Where should data come from?",
-        options=source_options,
-        format_func=lambda k: {
-            "hf": "🔒 Private Hugging Face dataset",
-            "repo": "📁 Bundled repo file (data/survey_data.csv)",
-            "upload": "⬆️ Upload a file to preview",
-        }[k],
-        index=0,
-    )
-    uploaded = st.file_uploader("CSV to preview", type="csv") if source == "upload" else None
+catalogue, label_maps, uniq_vars, data_raw = load_everything()
 
-catalogue, label_maps, uniq_vars, data_raw, source_note = load_everything(source, uploaded)
+if "SubmissionDate" in data_raw.columns:
+    _last_interview = pd.to_datetime(data_raw["SubmissionDate"], errors="coerce", dayfirst=True).max()
+    if pd.notna(_last_interview):
+        st.sidebar.caption(f"🗓️ Last interview: {_last_interview.strftime('%d %b %Y, %H:%M')}")
+st.sidebar.caption(f"🔄 Dashboard updated: {pd.Timestamp.now().strftime('%d %b %Y, %H:%M')}")
 
 PAGES = [
     ("overview", "📖 Story Overview"),
