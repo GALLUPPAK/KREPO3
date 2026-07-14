@@ -8,6 +8,22 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 
+def _norm_code(v):
+    """Normalize a raw choice code for label lookup: 1.0 / '1.0' / 1 / '1' must
+    all match the same XLSForm choice-list key. Missing values pass through as
+    a string so callers can still show them explicitly if ever needed."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+        return str(f)
+    except (ValueError, TypeError):
+        return s
+
+
 NAVY = "#002147"
 RED = "#e4002b"
 GOLD = "#c9a227"
@@ -44,7 +60,7 @@ def bar_select_one(data: pd.DataFrame, col: str, list_name: str, label_maps: dic
     if len(s) < min_n:
         return None, 0
     lm = label_maps.get(list_name, {})
-    decoded = s.apply(lambda v: lm.get(str(v).strip(), str(v)))
+    decoded = s.apply(lambda v: lm.get(_norm_code(v), f"Unlisted code ({v})"))
     counts = decoded.value_counts()
     if counts.empty:
         return None, 0
@@ -99,7 +115,7 @@ def bar_select_one_merged(data: pd.DataFrame, col: str, merged_map: dict, title:
     s = data[col].dropna()
     if len(s) < min_n:
         return None, 0
-    decoded = s.apply(lambda v: merged_map.get(str(v).strip(), str(v)))
+    decoded = s.apply(lambda v: merged_map.get(_norm_code(v), f"Unlisted code ({v})"))
     counts = decoded.value_counts()
     if counts.empty:
         return None, 0
@@ -143,7 +159,7 @@ def grouped_bar_by_protocol(data: pd.DataFrame, col: str, list_name: str, label_
         return None, 0
     lm = label_maps.get(list_name, {})
     sub = sub.copy()
-    sub[col] = sub[col].apply(lambda v: lm.get(str(v).strip(), str(v)))
+    sub[col] = sub[col].apply(lambda v: lm.get(_norm_code(v), f"Unlisted code ({v})"))
     ct = pd.crosstab(sub[col], sub["protocol"], normalize="columns") * 100
     fig = go.Figure()
     for i, proto in enumerate(ct.columns):

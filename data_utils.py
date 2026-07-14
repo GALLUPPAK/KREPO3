@@ -210,12 +210,32 @@ def load_data(data_path: str = DATA_PATH_DEFAULT) -> pd.DataFrame:
     return df
 
 
+def hf_download(repo_id: str, filename: str, token: str, repo_type: str = "dataset") -> str:
+    """
+    Pull a file from a private Hugging Face Hub dataset repo and return the local
+    cached path. hf_hub_download checks the remote ETag on every call, so as long
+    as the caller re-invokes this (e.g. on a TTL'd st.cache_data), an updated file
+    pushed to the HF dataset is picked up automatically — no redeploy needed.
+    """
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(repo_id=repo_id, filename=filename, repo_type=repo_type, token=token)
+
+
 def decode_series(series: pd.Series, list_name: str, label_maps: dict) -> pd.Series:
     """Map a select_one column's coded values to English labels."""
     lm = label_maps.get(list_name, {})
     if not lm:
         return series
-    return series.apply(lambda v: lm.get(str(v).strip(), v) if pd.notna(v) else v)
+
+    def _norm(v):
+        s = str(v).strip()
+        try:
+            f = float(s)
+            return str(int(f)) if f.is_integer() else s
+        except (ValueError, TypeError):
+            return s
+
+    return series.apply(lambda v: lm.get(_norm(v), v) if pd.notna(v) else v)
 
 
 def coalesce_pathway_columns(data: pd.DataFrame, catalogue: pd.DataFrame) -> pd.DataFrame:

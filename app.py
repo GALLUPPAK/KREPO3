@@ -59,12 +59,12 @@ div.stButton>button {{ background-color:{RED}; color:white; border:none; }}
 # DATA LOADING (self-updating on daily file replace + optional live API)
 # --------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def _load_form_cached(mtime):
-    return du.load_form()
+def _load_form_cached(form_path):
+    return du.load_form(form_path)
 
 
 @st.cache_data(show_spinner=False)
-def _load_csv_cached(path, mtime):
+def _load_csv_cached(path, mtime_or_key):
     return du.load_data(path)
 
 
@@ -76,32 +76,75 @@ def _load_live_surveycto(server, form_id, username, password):
     return pd.read_csv(io.StringIO(r.text), low_memory=False)
 
 
-def load_everything(use_live: bool, uploaded_file):
-    form_mtime = os.path.getmtime(du.FORM_PATH_DEFAULT)
-    catalogue, label_maps = _load_form_cached(form_mtime)
-    uniq = du.get_unique_variables(catalogue)
+@st.cache_data(show_spinner="Pulling data from private Hugging Face dataset...", ttl=300)
+def _hf_paths(repo_id, data_filename, form_filename, token):
+    """Re-runs every 5 min (TTL) so an updated file pushed to the HF dataset is
+    picked up without redeploying the app. hf_hub_download checks the remote
+    ETag on each call, so unchanged files are served from local cache instantly."""
+    data_path = du.hf_download(repo_id, data_filename, token)
+    form_path = du.hf_download(repo_id, form_filename, token) if form_filename else FORM_PATH
+    return data_path, form_path
 
+
+def load_everything(source: str, uploaded_file):
     source_note = ""
-    if use_live:
+    form_path_to_use = du.FORM_PATH_DEFAULT
+    bundled_exists = os.path.exists(du.DATA_PATH_DEFAULT)
+
+    if source == "hf":
+        try:
+            hf = st.secrets["huggingface"]
+            data_path, form_path_to_use = _hf_paths(
+                hf["repo_id"], hf["data_filename"], hf.get("form_filename", ""), hf["token"]
+            )
+            source_note = f"Private Hugging Face dataset ({hf['repo_id']}) — refreshed every 5 min"
+        except Exception as e:
+            if bundled_exists:
+                st.sidebar.error(f"Hugging Face pull failed, falling back to bundled file. ({e})")
+                data_path = du.DATA_PATH_DEFAULT
+                source_note = "Bundled file (Hugging Face pull failed)"
+            else:
+                st.sidebar.error(
+                    f"Hugging Face pull failed and no bundled fallback file is present. ({e})\n\n"
+                    "Add `[huggingface]` credentials in Settings → Secrets, or switch the data "
+                    "source to Upload a file."
+                )
+                st.stop()
+    elif source == "live":
         try:
             s = st.secrets["surveycto"]
-            data = _load_live_surveycto(s["server"], s["form_id"], s["username"], s["password"])
+            data_df = _load_live_surveycto(s["server"], s["form_id"], s["username"], s["password"])
+            data_path = None
             source_note = f"Live SurveyCTO server ({s['server']}) — refreshed every 5 min"
         except Exception as e:
-            st.sidebar.error(f"Live pull failed, falling back to file. ({e})")
-            mtime = os.path.getmtime(du.DATA_PATH_DEFAULT)
-            data = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
-            source_note = "Bundled file (live pull failed)"
-    elif uploaded_file is not None:
-        data = pd.read_csv(uploaded_file, low_memory=False)
+            if bundled_exists:
+                st.sidebar.error(f"Live pull failed, falling back to bundled file. ({e})")
+                data_path = du.DATA_PATH_DEFAULT
+                source_note = "Bundled file (live pull failed)"
+            else:
+                st.sidebar.error(f"Live pull failed and no bundled fallback file is present. ({e})")
+                st.stop()
+    elif source == "upload" and uploaded_file is not None:
+        data_path = None
+        data_df = pd.read_csv(uploaded_file, low_memory=False)
         source_note = f"Uploaded file: {uploaded_file.name}"
+    elif bundled_exists:
+        data_path = du.DATA_PATH_DEFAULT
+        source_note = "Bundled repo file data/survey_data.csv"
     else:
-        mtime = os.path.getmtime(du.DATA_PATH_DEFAULT)
-        data = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
-        source_note = "Repo file data/survey_data.csv"
+        st.sidebar.warning("No data source selected yet — upload a CSV, or configure Hugging Face / "
+                            "SurveyCTO credentials in Settings → Secrets.")
+        st.stop()
 
-    data = du.coalesce_pathway_columns(data, catalogue)
-    return catalogue, label_maps, uniq, data, source_note
+    catalogue, label_maps = _load_form_cached(form_path_to_use)
+    uniq = du.get_unique_variables(catalogue)
+
+    if data_path is not None:
+        mtime = os.path.getmtime(data_path)
+        data_df = _load_csv_cached(data_path, mtime)
+
+    data_df = du.coalesce_pathway_columns(data_df, catalogue)
+    return catalogue, label_maps, uniq, data_df, source_note
 
 
 # --------------------------------------------------------------------------
@@ -111,13 +154,20 @@ st.sidebar.markdown("## National AI Hub for MNCH")
 st.sidebar.caption("Punjab Mapping · Study S-22620 · Gallup Pakistan Digital Analytics")
 
 with st.sidebar.expander("📡 Data source", expanded=False):
-    use_live = st.checkbox("Live SurveyCTO server", value=False,
-                            help="Requires [surveycto] credentials in Streamlit secrets")
-    uploaded = None
-    if not use_live:
-        uploaded = st.file_uploader("Or preview a different export (.csv)", type="csv")
+    source = st.radio(
+        "Where should data come from?",
+        options=["hf", "live", "repo", "upload"],
+        format_func=lambda k: {
+            "hf": "🔒 Private Hugging Face dataset",
+            "live": "📶 Live SurveyCTO server",
+            "repo": "📁 Bundled repo file",
+            "upload": "⬆️ Upload a file to preview",
+        }[k],
+        index=0,
+    )
+    uploaded = st.file_uploader("CSV to preview", type="csv") if source == "upload" else None
 
-catalogue, label_maps, uniq_vars, data_raw, source_note = load_everything(use_live, uploaded)
+catalogue, label_maps, uniq_vars, data_raw, source_note = load_everything(source, uploaded)
 st.sidebar.caption(f"📄 Source: {source_note}")
 st.sidebar.caption(f"🕒 Last loaded: {pd.Timestamp.now().strftime('%d %b %Y, %H:%M')}")
 
