@@ -1,9 +1,3 @@
-.streamlit/secrets.toml
 __pycache__/
 *.pyc
 .DS_Store
-
-# The actual respondent data stays OUT of the public GitHub repo — it lives in a
-# private Hugging Face dataset instead (see README). form.xlsx is just the
-# questionnaire structure (no respondent data) so it's fine to keep in git.
-data/survey_data.csv

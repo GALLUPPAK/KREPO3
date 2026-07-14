@@ -5,20 +5,16 @@ Story-style Streamlit + Plotly analytics dashboard for Gallup Pakistan / GPDA.
 
 DAILY DATA REFRESH:
   Just overwrite  data/survey_data.csv  in the GitHub repo with the latest
-  SurveyCTO export (same column layout) and push. Streamlit Cloud
-  redeploys automatically, and this app re-reads the file (cache is keyed
-  on the file's modified-time, so a same-filename overwrite is picked up
-  immediately — no code change needed, even if the number of rows or the
-  set of columns grows).
+  SurveyCTO export (same column layout — new columns are fine too) and
+  push. Streamlit Cloud redeploys automatically, and this app re-reads the
+  file (cache is keyed on the file's modified-time, so a same-filename
+  overwrite is picked up immediately — no code change needed, even if the
+  number of rows or the set of columns grows).
 
-LIVE SURVEYCTO MODE:
-  Add server/form/username/password to Streamlit secrets (see README) and
-  flip "Live SurveyCTO server" on in the sidebar to pull the current data
-  directly from the SurveyCTO API instead of the bundled CSV.
+  The sidebar "📡 Data source" panel also lets you upload a CSV ad hoc to
+  preview a different export without touching the repo.
 """
 import os
-import io
-import requests
 import pandas as pd
 import streamlit as st
 
@@ -56,7 +52,7 @@ div.stButton>button {{ background-color:{RED}; color:white; border:none; }}
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------
-# DATA LOADING (self-updating on daily file replace + optional live API)
+# DATA LOADING (replace data/survey_data.csv in the repo, or upload a file to preview)
 # --------------------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def _load_form_cached(form_path):
@@ -64,85 +60,27 @@ def _load_form_cached(form_path):
 
 
 @st.cache_data(show_spinner=False)
-def _load_csv_cached(path, mtime_or_key):
+def _load_csv_cached(path, mtime):
     return du.load_data(path)
 
 
-@st.cache_data(show_spinner="Pulling live data from SurveyCTO...", ttl=300)
-def _load_live_surveycto(server, form_id, username, password):
-    url = f"https://{server}.surveycto.com/api/v2/forms/data/csv/{form_id}?date=0"
-    r = requests.get(url, auth=(username, password), timeout=60)
-    r.raise_for_status()
-    return pd.read_csv(io.StringIO(r.text), low_memory=False)
-
-
-@st.cache_data(show_spinner="Pulling data from private Hugging Face dataset...", ttl=300)
-def _hf_paths(repo_id, data_filename, form_filename, token):
-    """Re-runs every 5 min (TTL) so an updated file pushed to the HF dataset is
-    picked up without redeploying the app. hf_hub_download checks the remote
-    ETag on each call, so unchanged files are served from local cache instantly."""
-    data_path = du.hf_download(repo_id, data_filename, token)
-    form_path = du.hf_download(repo_id, form_filename, token) if form_filename else FORM_PATH
-    return data_path, form_path
-
-
 def load_everything(source: str, uploaded_file):
-    source_note = ""
-    form_path_to_use = du.FORM_PATH_DEFAULT
     bundled_exists = os.path.exists(du.DATA_PATH_DEFAULT)
 
-    if source == "hf":
-        try:
-            hf = st.secrets["huggingface"]
-            data_path, form_path_to_use = _hf_paths(
-                hf["repo_id"], hf["data_filename"], hf.get("form_filename", ""), hf["token"]
-            )
-            source_note = f"Private Hugging Face dataset ({hf['repo_id']}) — refreshed every 5 min"
-        except Exception as e:
-            if bundled_exists:
-                st.sidebar.error(f"Hugging Face pull failed, falling back to bundled file. ({e})")
-                data_path = du.DATA_PATH_DEFAULT
-                source_note = "Bundled file (Hugging Face pull failed)"
-            else:
-                st.sidebar.error(
-                    f"Hugging Face pull failed and no bundled fallback file is present. ({e})\n\n"
-                    "Add `[huggingface]` credentials in Settings → Secrets, or switch the data "
-                    "source to Upload a file."
-                )
-                st.stop()
-    elif source == "live":
-        try:
-            s = st.secrets["surveycto"]
-            data_df = _load_live_surveycto(s["server"], s["form_id"], s["username"], s["password"])
-            data_path = None
-            source_note = f"Live SurveyCTO server ({s['server']}) — refreshed every 5 min"
-        except Exception as e:
-            if bundled_exists:
-                st.sidebar.error(f"Live pull failed, falling back to bundled file. ({e})")
-                data_path = du.DATA_PATH_DEFAULT
-                source_note = "Bundled file (live pull failed)"
-            else:
-                st.sidebar.error(f"Live pull failed and no bundled fallback file is present. ({e})")
-                st.stop()
-    elif source == "upload" and uploaded_file is not None:
-        data_path = None
+    if source == "upload" and uploaded_file is not None:
         data_df = pd.read_csv(uploaded_file, low_memory=False)
         source_note = f"Uploaded file: {uploaded_file.name}"
     elif bundled_exists:
-        data_path = du.DATA_PATH_DEFAULT
+        mtime = os.path.getmtime(du.DATA_PATH_DEFAULT)
+        data_df = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
         source_note = "Bundled repo file data/survey_data.csv"
     else:
-        st.sidebar.warning("No data source selected yet — upload a CSV, or configure Hugging Face / "
-                            "SurveyCTO credentials in Settings → Secrets.")
+        st.sidebar.warning("No data file found. Upload a CSV to preview, or add "
+                            "data/survey_data.csv to the repo.")
         st.stop()
 
-    catalogue, label_maps = _load_form_cached(form_path_to_use)
+    catalogue, label_maps = _load_form_cached(du.FORM_PATH_DEFAULT)
     uniq = du.get_unique_variables(catalogue)
-
-    if data_path is not None:
-        mtime = os.path.getmtime(data_path)
-        data_df = _load_csv_cached(data_path, mtime)
-
     data_df = du.coalesce_pathway_columns(data_df, catalogue)
     return catalogue, label_maps, uniq, data_df, source_note
 
@@ -156,11 +94,9 @@ st.sidebar.caption("Punjab Mapping · Study S-22620 · Gallup Pakistan Digital A
 with st.sidebar.expander("📡 Data source", expanded=False):
     source = st.radio(
         "Where should data come from?",
-        options=["hf", "live", "repo", "upload"],
+        options=["repo", "upload"],
         format_func=lambda k: {
-            "hf": "🔒 Private Hugging Face dataset",
-            "live": "📶 Live SurveyCTO server",
-            "repo": "📁 Bundled repo file",
+            "repo": "📁 Bundled repo file (data/survey_data.csv)",
             "upload": "⬆️ Upload a file to preview",
         }[k],
         index=0,
@@ -170,6 +106,31 @@ with st.sidebar.expander("📡 Data source", expanded=False):
 catalogue, label_maps, uniq_vars, data_raw, source_note = load_everything(source, uploaded)
 st.sidebar.caption(f"📄 Source: {source_note}")
 st.sidebar.caption(f"🕒 Last loaded: {pd.Timestamp.now().strftime('%d %b %Y, %H:%M')}")
+
+PAGES = [
+    ("overview", "📖 Story Overview"),
+    ("fieldwork", "🗺️ Sample & Fieldwork"),
+    ("wb", "👩 Woman's Profile"),
+    ("ma", "💍 Marriage & Household"),
+    ("cm", "👶 Birth History & Eligibility"),
+    ("pt", "🧭 Pathway Typing"),
+    ("mn", "🏥 Antenatal Care (ANC)"),
+    ("pu", "📚 Health Literacy & Records"),
+    ("delay1", "⏱️ Delay 1 — Recognition & Decision"),
+    ("delay2", "🚗 Delay 2 — Journey to Facility"),
+    ("delay3", "🏨 Delay 3 — Facility Arrival & Care"),
+    ("ec_detail", "🚨 Emergency Complications Detail"),
+    ("costing", "💰 Costing & Payments"),
+    ("outcomes", "🍼 Outcomes & Newborn Care"),
+    ("referral", "🔁 Referral Journey"),
+    ("pnc", "🤱 Postnatal Care & Breastfeeding"),
+    ("dr_access", "📱 Digital Readiness — Access"),
+    ("dr_usage", "💳 Digital Readiness — Usage & Finance"),
+    ("dr_trust", "🤝 Digital Readiness — Info, Trust & Tools"),
+    ("quality", "✅ Data Quality & Interviewer Notes"),
+]
+st.sidebar.markdown("---")
+page_key = st.sidebar.radio("Navigate", options=[p[0] for p in PAGES], format_func=lambda k: dict(PAGES)[k])
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Filters")
@@ -194,30 +155,6 @@ if sel_protocols:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(f"**{len(data)}** of **{len(data_raw)}** interviews shown")
-
-PAGES = [
-    ("overview", "📖 Story Overview"),
-    ("fieldwork", "🗺️ Sample & Fieldwork"),
-    ("wb", "👩 Woman's Profile"),
-    ("ma", "💍 Marriage & Household"),
-    ("cm", "👶 Birth History & Eligibility"),
-    ("pt", "🧭 Pathway Typing"),
-    ("mn", "🏥 Antenatal Care (ANC)"),
-    ("pu", "📚 Health Literacy & Records"),
-    ("delay1", "⏱️ Delay 1 — Recognition & Decision"),
-    ("delay2", "🚗 Delay 2 — Journey to Facility"),
-    ("delay3", "🏨 Delay 3 — Facility Arrival & Care"),
-    ("ec_detail", "🚨 Emergency Complications Detail"),
-    ("costing", "💰 Costing & Payments"),
-    ("outcomes", "🍼 Outcomes & Newborn Care"),
-    ("referral", "🔁 Referral Journey"),
-    ("pnc", "🤱 Postnatal Care & Breastfeeding"),
-    ("dr_access", "📱 Digital Readiness — Access"),
-    ("dr_usage", "💳 Digital Readiness — Usage & Finance"),
-    ("dr_trust", "🤝 Digital Readiness — Info, Trust & Tools"),
-    ("quality", "✅ Data Quality & Interviewer Notes"),
-]
-page_key = st.sidebar.radio("Navigate", options=[p[0] for p in PAGES], format_func=lambda k: dict(PAGES)[k])
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Gallup Pakistan Digital Analytics (GPDA)")
