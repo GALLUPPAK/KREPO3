@@ -64,10 +64,64 @@ def _load_csv_cached(path, mtime):
     return du.load_data(path)
 
 
+def _hf_secrets_available() -> bool:
+    try:
+        hf = st.secrets["huggingface"]
+        return "repo_id" in hf and _resolve_hf_token(hf) is not None
+    except Exception:
+        return False
+
+
+def _resolve_hf_token(hf_secrets):
+    """Prefer an explicit token in st.secrets; fall back to the BA_TKN environment
+    variable, matching the convention already used on the gallupdb HF Spaces."""
+    token = hf_secrets.get("token") if hf_secrets else None
+    return token or os.environ.get("BA_TKN")
+
+
+def _hf_filename(hf_secrets, base_filename: str) -> str:
+    subfolder = hf_secrets.get("subfolder", "").strip("/")
+    return f"{subfolder}/{base_filename}" if subfolder else base_filename
+
+
+@st.cache_data(show_spinner="Pulling data from private Hugging Face dataset...", ttl=300)
+def _hf_paths(repo_id, data_filename, form_filename, token):
+    """Re-runs every 5 min (TTL) so an updated file pushed to the HF dataset is
+    picked up without redeploying the app. hf_hub_download checks the remote
+    ETag on each call, so an unchanged file is served from local cache instantly."""
+    data_path = du.hf_download(repo_id, data_filename, token)
+    form_path = du.hf_download(repo_id, form_filename, token) if form_filename else du.FORM_PATH_DEFAULT
+    return data_path, form_path
+
+
 def load_everything(source: str, uploaded_file):
     bundled_exists = os.path.exists(du.DATA_PATH_DEFAULT)
+    form_path_to_use = du.FORM_PATH_DEFAULT
 
-    if source == "upload" and uploaded_file is not None:
+    if source == "hf":
+        try:
+            hf = st.secrets["huggingface"]
+            token = _resolve_hf_token(hf)
+            if not token:
+                raise RuntimeError("No token found in secrets or the BA_TKN environment variable.")
+            data_path, form_path_to_use = _hf_paths(
+                hf["repo_id"],
+                _hf_filename(hf, hf.get("data_filename", "survey_data.csv")),
+                _hf_filename(hf, hf["form_filename"]) if hf.get("form_filename") else "",
+                token,
+            )
+            source_note = f"Private Hugging Face dataset ({hf['repo_id']}) — refreshed every 5 min"
+        except Exception as e:
+            if bundled_exists:
+                st.sidebar.warning(f"Hugging Face pull unavailable, showing bundled file instead. ({e})")
+                data_path = du.DATA_PATH_DEFAULT
+                source_note = "Bundled file (Hugging Face unavailable)"
+            else:
+                st.sidebar.error(f"Hugging Face pull failed and no bundled fallback file is present. ({e})")
+                st.stop()
+        mtime = os.path.getmtime(data_path)
+        data_df = _load_csv_cached(data_path, mtime)
+    elif source == "upload" and uploaded_file is not None:
         data_df = pd.read_csv(uploaded_file, low_memory=False)
         source_note = f"Uploaded file: {uploaded_file.name}"
     elif bundled_exists:
@@ -75,11 +129,11 @@ def load_everything(source: str, uploaded_file):
         data_df = _load_csv_cached(du.DATA_PATH_DEFAULT, mtime)
         source_note = "Bundled repo file data/survey_data.csv"
     else:
-        st.sidebar.warning("No data file found. Upload a CSV to preview, or add "
-                            "data/survey_data.csv to the repo.")
+        st.sidebar.warning("No data file found. Upload a CSV to preview, or configure the "
+                            "[huggingface] source in Settings → Secrets.")
         st.stop()
 
-    catalogue, label_maps = _load_form_cached(du.FORM_PATH_DEFAULT)
+    catalogue, label_maps = _load_form_cached(form_path_to_use)
     uniq = du.get_unique_variables(catalogue)
     data_df = du.coalesce_pathway_columns(data_df, catalogue)
     return catalogue, label_maps, uniq, data_df, source_note
@@ -92,10 +146,13 @@ st.sidebar.markdown("## National AI Hub for MNCH")
 st.sidebar.caption("Punjab Mapping · Study S-22620 · Gallup Pakistan Digital Analytics")
 
 with st.sidebar.expander("📡 Data source", expanded=False):
+    hf_ready = _hf_secrets_available()
+    source_options = (["hf"] if hf_ready else []) + ["repo", "upload"]
     source = st.radio(
         "Where should data come from?",
-        options=["repo", "upload"],
+        options=source_options,
         format_func=lambda k: {
+            "hf": "🔒 Private Hugging Face dataset",
             "repo": "📁 Bundled repo file (data/survey_data.csv)",
             "upload": "⬆️ Upload a file to preview",
         }[k],
