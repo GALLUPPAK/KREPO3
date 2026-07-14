@@ -161,8 +161,6 @@ with st.sidebar.expander("📡 Data source", expanded=False):
     uploaded = st.file_uploader("CSV to preview", type="csv") if source == "upload" else None
 
 catalogue, label_maps, uniq_vars, data_raw, source_note = load_everything(source, uploaded)
-st.sidebar.caption(f"📄 Source: {source_note}")
-st.sidebar.caption(f"🕒 Last loaded: {pd.Timestamp.now().strftime('%d %b %Y, %H:%M')}")
 
 PAGES = [
     ("overview", "📖 Story Overview"),
